@@ -1,61 +1,61 @@
-name: GitHub CI
+# This is a basic workflow to help you get started with Actions
 
-on:
-  pull_request:
+name: Deploy to Amazon ECS(CI) # workflow名称，可以随意改
+
+# Controls when the workflow will run
+on:                                # workflow的事件钩子，告知程序说明时候出发自动部署
+  # Triggers the workflow on push or pull request events but only for the master branch
   push:
-  schedule:
-    - cron: 0 0 * * 0
+    branches: [ master]                 # 在master分支有push操作的时候自动部署
+  pull_request:
+    branches: [ master ]
 
-defaults:
-  run:
-    shell: 'bash -Eeuo pipefail -x {0}'
-
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-
-  verify:
-    name: Verify Binaries
+  CI:
+    name: CI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v1
-      - name: Update Binaries
-        run: ./update.sh
-      - name: Verify Changes
-        run: |
-          changes="$(git status --porcelain '**/hello' '**/nanoserver*/hello.txt')"
-          test -z "$changes"
+    # Run UT Test For  Success Or failure
+    - name: Check commit status
+      id: commit-status
+      run: |
+        # Check the status of the Git commit
+        CURRENT_STATUS=$(curl --url https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/status --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' | jq -r '.state');
+        echo "Current status is: $CURRENT_STATUS"
+        if [ "${CURRENT_STATUS^^}" = "FAILURE" ]; 
+          then echo "Commit status failed. Canceling execution"; 
+          exit 1; 
+        fi
 
-  generate-jobs:
-    needs: verify
-    name: Generate Jobs
-    runs-on: ubuntu-latest
-    outputs:
-      strategy: ${{ steps.generate-jobs.outputs.strategy }}
-    steps:
-      - uses: actions/checkout@v1
-      - id: generate-jobs
-        name: Generate Jobs
-        run: |
-          git clone --depth 1 https://github.com/docker-library/bashbrew.git -b master ~/bashbrew
-          strategy="$(~/bashbrew/scripts/github-actions/generate.sh)"
-          jq . <<<"$strategy" # sanity check / debugging aid
-          echo "::set-output name=strategy::$strategy"
+    # Checkout repository for workflow access
+    - name: checkout
+      uses: actions/checkout@v2
 
-  test:
-    needs: generate-jobs
-    strategy: ${{ fromJson(needs.generate-jobs.outputs.strategy) }}
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v1
-      - name: Prepare Environment
-        run: ${{ matrix.runs.prepare }}
-      - name: Pull Dependencies
-        run: ${{ matrix.runs.pull }}
-      - name: Build ${{ matrix.name }}
-        run: ${{ matrix.runs.build }}
-      - name: History ${{ matrix.name }}
-        run: ${{ matrix.runs.history }}
-      - name: Test ${{ matrix.name }}
-        run: ${{ matrix.runs.test }}
-      - name: '"docker images"'
-        run: ${{ matrix.runs.images }}
+    #Configure AWS CLI Credentials Retrieve from GitHub secrets
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-northeast-1
+
+    #Login to ECR Login to AWS ECR
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    #Build Image Build ,tag,and Push image to Aws ECR
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ecs-devops-sandbox-repository
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build a docker container and
+        # push it to ECR so that it can
+        # be deployed to ECS.
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
